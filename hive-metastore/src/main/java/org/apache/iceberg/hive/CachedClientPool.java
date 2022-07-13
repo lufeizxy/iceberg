@@ -21,16 +21,24 @@ package org.apache.iceberg.hive;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import java.io.IOException;
+import java.security.PrivilegedExceptionAction;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hive.conf.HiveConf;
 import org.apache.hadoop.hive.metastore.IMetaStoreClient;
+import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.ClientPool;
 import org.apache.iceberg.relocated.com.google.common.annotations.VisibleForTesting;
 import org.apache.iceberg.util.PropertyUtil;
+import org.apache.spark.SparkContext;
+import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.internal.SQLConf;
 import org.apache.thrift.TException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class CachedClientPool implements ClientPool<IMetaStoreClient, TException> {
 
@@ -40,6 +48,7 @@ public class CachedClientPool implements ClientPool<IMetaStoreClient, TException
   private final String metastoreUri;
   private final int clientPoolSize;
   private final long evictionInterval;
+  private static final Logger LOG = LoggerFactory.getLogger(CachedClientPool.class);
 
   CachedClientPool(Configuration conf, Map<String, String> properties) {
     this.conf = conf;
@@ -54,8 +63,35 @@ public class CachedClientPool implements ClientPool<IMetaStoreClient, TException
   }
 
   @VisibleForTesting
-  HiveClientPool clientPool() {
-    return clientPoolCache.get(metastoreUri, k -> new HiveClientPool(clientPoolSize, conf));
+  @SuppressWarnings({"Slf4jConstantLogMessage"})
+  synchronized HiveClientPool clientPool() {
+    SparkSession sparkSession = SparkSession.getActiveSession().get();
+    SparkContext sc = sparkSession.sparkContext();
+    SQLConf sqlConf = sparkSession.sqlContext().conf();
+    String sqlUser = "";
+    if (sqlConf.hiveSubmitSqlHasView()) {
+      sqlUser = sqlConf.hiveRealSubmitUser();
+    } else if (sc.conf().getBoolean("spark.proxyuser.enabled", false)) {
+      sqlUser = sc.getLocalProperty("spark.sql.user");
+    } else {
+      sqlUser = sparkSession.sparkContext().sparkUser();
+    }
+    if (sqlUser == null || "".equals(sqlUser)) {
+      sqlUser = sparkSession.sparkContext().sparkUser();
+    }
+    UserGroupInformation proxyUser = UserGroupInformation.createRemoteUser(sqlUser);
+    LOG.info("Iceberg catalog to " + metastoreUri + " with user " + proxyUser.getShortUserName());
+    try {
+      return proxyUser.doAs(
+              (PrivilegedExceptionAction<HiveClientPool>) () ->
+                      clientPoolCache.get(metastoreUri + proxyUser.getShortUserName(), k -> new HiveClientPool(clientPoolSize, conf))
+      );
+    } catch (IOException e) {
+      LOG.error(e.getMessage(), e);
+    } catch (InterruptedException e) {
+      LOG.error(e.getMessage(), e);
+    }
+    return clientPoolCache.get(metastoreUri + proxyUser.getShortUserName(), k -> new HiveClientPool(clientPoolSize, conf));
   }
 
   private synchronized void init() {

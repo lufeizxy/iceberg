@@ -22,34 +22,25 @@ package org.apache.iceberg.hive;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import java.io.IOException;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
-import java.util.Collections;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Optional;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hive.common.StatsSetupConst;
+import org.apache.hadoop.hive.conf.HiveConf;
 import org.apache.hadoop.hive.metastore.IMetaStoreClient;
 import org.apache.hadoop.hive.metastore.TableType;
 import org.apache.hadoop.hive.metastore.api.InvalidObjectException;
-import org.apache.hadoop.hive.metastore.api.LockComponent;
-import org.apache.hadoop.hive.metastore.api.LockLevel;
-import org.apache.hadoop.hive.metastore.api.LockRequest;
-import org.apache.hadoop.hive.metastore.api.LockResponse;
-import org.apache.hadoop.hive.metastore.api.LockState;
-import org.apache.hadoop.hive.metastore.api.LockType;
-import org.apache.hadoop.hive.metastore.api.NoSuchObjectException;
-import org.apache.hadoop.hive.metastore.api.SerDeInfo;
-import org.apache.hadoop.hive.metastore.api.StorageDescriptor;
-import org.apache.hadoop.hive.metastore.api.Table;
-import org.apache.hadoop.hive.metastore.api.hive_metastoreConstants;
+import org.apache.hadoop.hive.metastore.api.*;
+import org.apache.hadoop.hive.ql.metadata.HiveException;
+import org.apache.hadoop.hive.ql.session.CreateTableAutomaticGrant;
+import org.apache.hadoop.hive.ql.session.SessionState;
+import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.iceberg.BaseMetastoreTableOperations;
 import org.apache.iceberg.ClientPool;
 import org.apache.iceberg.PartitionSpecParser;
@@ -324,6 +315,43 @@ public class HiveTableOperations extends BaseMetastoreTableOperations {
       });
     } else {
       metaClients.run(client -> {
+        PrincipalPrivilegeSet principalPrivs = new PrincipalPrivilegeSet();
+        SessionState ss = SessionState.get();
+        if (ss != null) {
+          CreateTableAutomaticGrant grants = ss.getCreateTableGrants();
+          if (grants != null) {
+            principalPrivs.setUserPrivileges(grants.getUserGrants());
+            principalPrivs.setGroupPrivileges(grants.getGroupGrants());
+            principalPrivs.setRolePrivileges(grants.getRoleGrants());
+            hmsTable.setPrivileges(principalPrivs);
+          }
+        } else {
+          try {
+            String user = UserGroupInformation.getCurrentUser().getShortUserName();
+
+            Map<String, List<PrivilegeGrantInfo>> userGrants = new HashMap<String, List<PrivilegeGrantInfo>>();
+            List<PrivilegeGrantInfo> userGrantInfoList = new ArrayList<PrivilegeGrantInfo>();
+            PrivilegeGrantInfo drop = new PrivilegeGrantInfo("drop", -1, user,
+                    PrincipalType.USER, true);
+            userGrantInfoList.add(drop);
+            userGrants.put("hdfs", userGrantInfoList);
+            userGrants.put("work", userGrantInfoList);
+
+            Map<String, List<PrivilegeGrantInfo>> curUserGrants = new HashMap<String, List<PrivilegeGrantInfo>>();
+            List<PrivilegeGrantInfo> ownerGrantInfoList = new ArrayList<PrivilegeGrantInfo>();
+            PrivilegeGrantInfo all = new PrivilegeGrantInfo("ALL", -1, user,
+                    PrincipalType.USER, true);
+            ownerGrantInfoList.add(all);
+            curUserGrants.put(user, ownerGrantInfoList);
+            curUserGrants.putAll(userGrants);
+
+            principalPrivs.setUserPrivileges(curUserGrants);
+            hmsTable.setPrivileges(principalPrivs);
+
+          } catch (IOException e) {
+            e.printStackTrace();
+          }
+        }
         client.createTable(hmsTable);
         return null;
       });
