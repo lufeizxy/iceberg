@@ -28,6 +28,8 @@ import org.apache.iceberg.encryption.EncryptionManager;
 import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.exceptions.CommitFailedException;
 import org.apache.iceberg.exceptions.NoSuchTableException;
+import org.apache.iceberg.exceptions.NotFoundException;
+import org.apache.iceberg.exceptions.PermissionException;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.LocationProvider;
 import org.apache.iceberg.io.OutputFile;
@@ -164,7 +166,7 @@ public abstract class BaseMetastoreTableOperations implements TableOperations {
   }
 
   protected void refreshFromMetadataLocation(String newLocation) {
-    refreshFromMetadataLocation(newLocation, null, 20);
+    refreshFromMetadataLocation(newLocation, null, 5);
   }
 
   protected void refreshFromMetadataLocation(String newLocation, int numRetries) {
@@ -185,8 +187,9 @@ public abstract class BaseMetastoreTableOperations implements TableOperations {
 
       AtomicReference<TableMetadata> newMetadata = new AtomicReference<>();
       Tasks.foreach(newLocation)
-          .retry(numRetries).exponentialBackoff(100, 5000, 600000, 4.0 /* 100, 400, 1600, ... */)
-          .throwFailureWhenFinished()
+              .retry(numRetries).stopRetryOn(PermissionException.class, NotFoundException.class)
+              .exponentialBackoff(100, 5000, 600000, 4.0 /* 100, 400, 1600, ... */)
+              .throwFailureWhenFinished()
           .shouldRetryTest(shouldRetry)
           .run(metadataLocation -> newMetadata.set(metadataLoader.apply(metadataLocation)));
 
