@@ -22,6 +22,7 @@ package org.apache.spark.sql.execution.datasources.v2
 import org.apache.iceberg.spark.Spark3Util
 import org.apache.iceberg.spark.SparkCatalog
 import org.apache.iceberg.spark.SparkSessionCatalog
+import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.Strategy
 import org.apache.spark.sql.catalyst.InternalRow
@@ -56,26 +57,33 @@ case class ExtendedDataSourceV2Strategy(spark: SparkSession) extends Strategy {
 
   override def apply(plan: LogicalPlan): Seq[SparkPlan] = plan match {
     case c @ Call(procedure, args) =>
+      checkWritable()
       val input = buildInternalRow(args)
       CallExec(c.output, procedure, input) :: Nil
 
     case AddPartitionField(IcebergCatalogAndIdentifier(catalog, ident), transform, name) =>
+      checkWritable()
       AddPartitionFieldExec(catalog, ident, transform, name) :: Nil
 
     case DropPartitionField(IcebergCatalogAndIdentifier(catalog, ident), transform) =>
+      checkWritable()
       DropPartitionFieldExec(catalog, ident, transform) :: Nil
 
     case ReplacePartitionField(IcebergCatalogAndIdentifier(catalog, ident), transformFrom, transformTo, name) =>
+      checkWritable()
       ReplacePartitionFieldExec(catalog, ident, transformFrom, transformTo, name) :: Nil
 
     case SetIdentifierFields(IcebergCatalogAndIdentifier(catalog, ident), fields) =>
+      checkWritable()
       SetIdentifierFieldsExec(catalog, ident, fields) :: Nil
 
     case DropIdentifierFields(IcebergCatalogAndIdentifier(catalog, ident), fields) =>
+      checkWritable()
       DropIdentifierFieldsExec(catalog, ident, fields) :: Nil
 
     case SetWriteDistributionAndOrdering(
         IcebergCatalogAndIdentifier(catalog, ident), distributionMode, ordering) =>
+      checkWritable()
       SetWriteDistributionAndOrderingExec(catalog, ident, distributionMode, ordering) :: Nil
 
     case DynamicFileFilter(scanPlan, fileFilterPlan, filterable) =>
@@ -142,6 +150,12 @@ case class ExtendedDataSourceV2Strategy(spark: SparkSession) extends Strategy {
         case _ =>
           None
       }
+    }
+  }
+
+  private def checkWritable(): Unit = {
+    if(!spark.sqlContext.conf.getConfString("spark.iceberg.writable", "false").toBoolean){
+      throw new AnalysisException("Spark限制了修改Iceberg的功能，请使用WStream平台或者联系管理员。")
     }
   }
 }
