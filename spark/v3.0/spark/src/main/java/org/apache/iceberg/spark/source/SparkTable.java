@@ -146,6 +146,11 @@ public class SparkTable implements org.apache.spark.sql.connector.catalog.Table,
       propsBuilder.put("sort-order", Spark3Util.describe(icebergTable.sortOrder()));
     }
 
+    Set<String> identifierFieldNames = icebergTable.schema().identifierFieldNames();
+    if (identifierFieldNames != null && !identifierFieldNames.isEmpty()) {
+      propsBuilder.put("primary-key", identifierFieldNames.toString());
+    }
+
     icebergTable.properties().entrySet().stream()
         .filter(entry -> !RESERVED_PROPERTIES.contains(entry.getKey()))
         .forEach(propsBuilder::put);
